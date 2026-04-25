@@ -9,8 +9,8 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
   import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, updateEmail, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
-  // Добавлен deleteDoc для удаления постов
-  import { getFirestore, collection, addDoc, getDocs, doc, getDoc, updateDoc, arrayUnion, query, orderBy, onSnapshot, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  // Added setDoc for tracking users
+  import { getFirestore, collection, addDoc, getDocs, doc, getDoc, setDoc, updateDoc, arrayUnion, query, orderBy, onSnapshot, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
   // ─────────────────────────────────────────
   // 🔧 CONFIGURATION — Fill in your own keys
@@ -50,17 +50,29 @@
   onAuthStateChanged(auth, async user => {
     window.currentUser = user;
     if (user) {
-      // Check admin status from Firestore
+      // 1. TRACK USER: Save/Update user in Firestore so admins can list them
+      try {
+        await setDoc(doc(db, "users", user.uid), {
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || user.email,
+          photoURL: user.photoURL || null
+        }, { merge: true });
+      } catch(e) { console.error("Could not save user data", e); }
+
+      // 2. Check admin status from Firestore
       try {
         const adminSnap = await getDoc(doc(db, "admins", user.uid));
         window.isAdmin = adminSnap.exists();
       } catch(e) {
         window.isAdmin = false;
       }
+      
       document.getElementById("auth-section").style.display = "none";
       document.getElementById("app-section").style.display  = "block";
       document.getElementById("user-name-display").textContent = user.displayName || user.email;
       updateTopbarAvatar(user.photoURL);
+      
       // Show admin button if admin
       const adminBtn = document.getElementById("admin-panel-btn");
       if (adminBtn) adminBtn.style.display = window.isAdmin ? "inline-flex" : "none";
@@ -83,6 +95,9 @@
       setAuthLoading(true);
       const cred = await createUserWithEmailAndPassword(auth, email, pass);
       await updateProfile(cred.user, { displayName: name });
+      // Force reload auth state to trigger the db save with the new name
+      await auth.currentUser.reload();
+      window.currentUser = auth.currentUser;
     } catch(e) { showAuthError(e.message); }
     finally { setAuthLoading(false); }
   };
@@ -160,10 +175,18 @@
         if (newPass.length < 6) throw new Error("Новый пароль должен содержать не менее 6 символов.");
         await updatePassword(u, newPass);
       }
-      // Force reload so auth.currentUser reflects new photoURL immediately
+      
+      // Update the firestore user document
+      try {
+        await setDoc(doc(db, "users", u.uid), {
+          displayName: newName,
+          photoURL: photoURL,
+          email: newEmail || u.email
+        }, { merge: true });
+      } catch(e) { console.warn("Failed to sync profile changes to db", e); }
+
       await auth.currentUser.reload();
       window.currentUser = auth.currentUser;
-      // refresh topbar using the local photoURL we just set (not stale u.photoURL)
       document.getElementById("user-name-display").textContent = auth.currentUser.displayName || auth.currentUser.email;
       updateTopbarAvatar(photoURL);
       okEl.textContent = "Профиль успешно обновлён!";
@@ -243,15 +266,21 @@
     } catch (e) { alert(e.message); }
   };
 
-  // ── Load Posts
+  // ── Load Posts (FIXED: combined into one function)
   let unsubPosts = null;
+  let allPostsCache = [];
+
   function loadPosts() {
     if (unsubPosts) unsubPosts();
     const q = query(collection(db, "posts"), orderBy("createdAt", "desc"));
     unsubPosts = onSnapshot(q, snap => {
-      const posts = [];
-      snap.forEach(d => posts.push({ id: d.id, ...d.data() }));
-      renderPosts(posts);
+      allPostsCache = [];
+      snap.forEach(d => allPostsCache.push({ id: d.id, ...d.data() }));
+      renderPosts(allPostsCache);
+      // refresh admin panel posts if open
+      if (document.getElementById("admin-panel").style.display === "flex") {
+        renderAdminPosts(allPostsCache);
+      }
     });
   }
 
@@ -478,28 +507,10 @@
   document.addEventListener("keydown", e => { if (e.key === "Escape") { closeModal(); closeProfileModal(); closeAdminPanel(); } });
 
   // ── Admin Panel ───────────────────────────────────────────────────────────
-  let allPostsCache = [];
-
-  // Keep a cache of all posts for admin panel
-  const origLoadPosts = loadPosts;
-  function loadPosts() {
-    if (unsubPosts) unsubPosts();
-    const q = query(collection(db, "posts"), orderBy("createdAt", "desc"));
-    unsubPosts = onSnapshot(q, snap => {
-      allPostsCache = [];
-      snap.forEach(d => allPostsCache.push({ id: d.id, ...d.data() }));
-      renderPosts(allPostsCache);
-      // refresh admin panel if open
-      if (document.getElementById("admin-panel").style.display === "flex") {
-        renderAdminPosts(allPostsCache);
-      }
-    });
-  }
-
   window.openAdminPanel = () => {
     document.getElementById("admin-panel").style.display = "flex";
     document.body.style.overflow = "hidden";
-    renderAdminPosts(allPostsCache);
+    switchAdminTab('posts'); // Default tab
   };
 
   window.closeAdminPanel = () => {
@@ -507,6 +518,18 @@
     document.body.style.overflow = "";
   };
 
+  // Switch Admin Tabs
+  window.switchAdminTab = (tab) => {
+    document.getElementById('admin-tab-posts').classList.toggle('active', tab === 'posts');
+    document.getElementById('admin-tab-users').classList.toggle('active', tab === 'users');
+    document.getElementById('admin-posts-container').style.display = tab === 'posts' ? 'block' : 'none';
+    document.getElementById('admin-users-container').style.display = tab === 'users' ? 'block' : 'none';
+    
+    if (tab === 'posts') renderAdminPosts(allPostsCache);
+    if (tab === 'users') loadAdminUsers();
+  };
+
+  // Admins - Posts Logic
   window.adminDeletePost = async (postId) => {
     if (!window.isAdmin) return;
     if (!confirm("ADMIN: Удалить этот пост?")) return;
@@ -575,6 +598,96 @@
       el.appendChild(div);
     });
   }
+
+  // Admins - Users Logic
+  let allUsersCache = [];
+  
+  window.loadAdminUsers = async () => {
+    const el = document.getElementById("admin-users-list");
+    el.innerHTML = "<p style='color:var(--muted);'>Загрузка пользователей...</p>";
+    try {
+      const usersSnap = await getDocs(collection(db, "users"));
+      const adminsSnap = await getDocs(collection(db, "admins"));
+      
+      const adminUids = new Set();
+      adminsSnap.forEach(d => adminUids.add(d.id));
+
+      allUsersCache = [];
+      usersSnap.forEach(d => {
+        const u = d.data();
+        allUsersCache.push({ ...u, isAdminStatus: adminUids.has(u.uid) });
+      });
+      renderAdminUsers();
+    } catch(e) {
+      el.innerHTML = `<p style="color:#a34444;">Ошибка: ${e.message}</p>`;
+    }
+  };
+
+  window.renderAdminUsers = () => {
+    const q = document.getElementById("admin-user-search").value.toLowerCase();
+    const el = document.getElementById("admin-users-list");
+    el.innerHTML = "";
+    
+    const filtered = allUsersCache.filter(u => 
+      (u.displayName && u.displayName.toLowerCase().includes(q)) || 
+      (u.email && u.email.toLowerCase().includes(q))
+    );
+
+    if (filtered.length === 0) {
+      el.innerHTML = `<p style="color:var(--muted);font-style:italic;">Пользователи не найдены.</p>`;
+      return;
+    }
+
+    filtered.forEach(u => {
+      const div = document.createElement("div");
+      div.className = "admin-post-row"; // reusing style
+      div.style.flexDirection = "row";
+      div.style.justifyContent = "space-between";
+      div.style.alignItems = "center";
+
+      const roleBadge = u.isAdminStatus 
+        ? `<span style="background:#e74c3c; color:#fff; font-size:9px; padding:2px 6px; border-radius:3px; margin-left:8px; vertical-align:middle;">ADMIN</span>` 
+        : "";
+
+      const btnHTML = u.uid === window.currentUser.uid 
+        ? `<span style="color:var(--muted); font-size:11px;">Это вы</span>`
+        : `<button onclick="toggleAdminRole('${u.uid}', ${u.isAdminStatus})" class="admin-expand-btn" style="${u.isAdminStatus ? 'border-color:#c0392b; color:#c0392b;' : 'border-color:var(--accent); color:var(--accent);'}">
+            ${u.isAdminStatus ? 'Снять права' : 'Сделать админом'}
+           </button>`;
+
+      div.innerHTML = `
+        <div style="display:flex; align-items:center; gap:12px;">
+          ${u.photoURL ? `<img src="${u.photoURL}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:1px solid var(--border);">` : `<div style="width:40px;height:40px;border-radius:50%;background:var(--bg3);border:1px solid var(--border);"></div>`}
+          <div>
+            <div style="font-size:14px; color:var(--accent);">${esc(u.displayName)} ${roleBadge}</div>
+            <div style="font-size:11px; color:var(--muted);">${esc(u.email)}</div>
+          </div>
+        </div>
+        <div>${btnHTML}</div>
+      `;
+      el.appendChild(div);
+    });
+  };
+
+  window.filterAdminUsers = () => renderAdminUsers();
+
+  window.toggleAdminRole = async (uid, currentStatus) => {
+    if (!window.isAdmin) return;
+    const msg = currentStatus 
+      ? "Удалить права администратора у этого пользователя?" 
+      : "Назначить этого пользователя администратором?";
+    if (!confirm(msg)) return;
+
+    try {
+      if (currentStatus) {
+        await deleteDoc(doc(db, "admins", uid));
+      } else {
+        await setDoc(doc(db, "admins", uid), { grantedAt: serverTimestamp() });
+      }
+      loadAdminUsers(); // Refresh the list
+    } catch(e) { alert("Ошибка: " + e.message); }
+  };
+
 </script>
 
 <style>
@@ -727,11 +840,6 @@ body {
 
 /* ── GRID ─────────────────────────────── */
 .feed-section { max-width:1200px; margin:0 auto; padding:0 40px 80px; }
-.feed-header { margin-bottom: 32px; display: flex; flex-wrap: wrap; gap: 10px; }
-/* Декоративные теги-фильтры как на скриншоте */
-.filter-tag { border: 1px solid var(--border); padding: 8px 16px; font-size: 11px; text-transform: uppercase; color: var(--muted); cursor: default; }
-.filter-tag.active { border-color: var(--accent); color: var(--accent); }
-
 .posts-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:24px; }
 .post-card { background:transparent; border:1px solid var(--border); overflow:hidden; cursor:pointer; transition:.3s; position: relative; }
 .post-card:hover { border-color:var(--accent); background: var(--bg2); }
@@ -815,6 +923,13 @@ body {
 .admin-header h2 { font-family:'Playfair Display',serif; font-size:20px; font-weight:400; color:#e74c3c; display:flex; align-items:center; gap:10px; }
 .admin-close { background:transparent; border:none; color:var(--muted); font-size:20px; cursor:pointer; transition:.2s; }
 .admin-close:hover { color:#e74c3c; }
+
+/* Admin Tabs */
+.admin-tabs { display:flex; border-bottom:1px solid var(--border); }
+.admin-tab { flex:1; padding:12px; text-align:center; cursor:pointer; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--muted); background:transparent; border:none; border-bottom:2px solid transparent; transition:.2s; }
+.admin-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.admin-tab:hover:not(.active) { color:#fff; }
+
 .admin-stats { display:flex; gap:0; border-bottom:1px solid var(--border); }
 .admin-stat { flex:1; padding:16px 32px; border-right:1px solid var(--border); }
 .admin-stat:last-child { border-right:none; }
@@ -980,20 +1095,16 @@ body {
   </div>
 </div>
 
-<!-- ── PROFILE MODAL ──────────────────────────── -->
 <div id="profile-modal" onclick="if(event.target===this)closeProfileModal()" style="display:none;position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.92);backdrop-filter:blur(6px);overflow-y:auto;padding:40px 20px;align-items:flex-start;justify-content:center;">
   <div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:500px;margin:auto;animation:modalIn .35s ease-out;">
 
-    <!-- Header -->
     <div style="padding:28px 32px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);">
       <h2 style="font-family:'Playfair Display',serif;font-size:22px;font-weight:400;color:var(--accent);">Настройки профиля</h2>
       <button onclick="closeProfileModal()" style="background:transparent;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1;transition:.2s;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">✕</button>
     </div>
 
-    <!-- Body -->
     <div style="padding:28px 32px;display:flex;flex-direction:column;gap:20px;">
 
-      <!-- Avatar -->
       <div style="display:flex;flex-direction:column;gap:10px;">
         <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Фото профиля</label>
         <div style="display:flex;align-items:center;gap:16px;">
@@ -1005,66 +1116,72 @@ body {
         </div>
       </div>
 
-      <!-- Name -->
       <div style="display:flex;flex-direction:column;gap:8px;">
         <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Имя пользователя</label>
         <input id="prof-name-input" type="text" placeholder="Ваше имя" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
       </div>
 
-      <!-- Divider -->
       <div style="border-top:1px dashed rgba(220,205,175,0.1);margin:4px 0;"></div>
       <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Изменить email или пароль</p>
 
-      <!-- Email -->
       <div style="display:flex;flex-direction:column;gap:8px;">
         <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Новый Email</label>
         <input id="prof-email-input" type="email" placeholder="Оставьте пустым, если не меняете" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
       </div>
 
-      <!-- New Password -->
       <div style="display:flex;flex-direction:column;gap:8px;">
         <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Новый пароль</label>
         <input id="prof-pass-new" type="password" placeholder="Оставьте пустым, если не меняете" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
       </div>
 
-      <!-- Current password for reauth -->
       <div style="display:flex;flex-direction:column;gap:8px;background:var(--bg2);padding:16px;border:1px solid var(--border);">
         <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Текущий пароль <span style="opacity:.6;">(обязателен при смене email / пароля)</span></label>
         <input id="prof-reauth-pass" type="password" placeholder="Введите текущий пароль" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
       </div>
 
-      <!-- Messages -->
       <div id="prof-error"   style="color:#a34444;font-size:13px;min-height:14px;"></div>
       <div id="prof-success" style="color:#4a8a4a;font-size:13px;min-height:14px;"></div>
 
-      <!-- Save btn -->
       <button id="prof-save-btn" onclick="saveProfile()" style="background:transparent;color:var(--accent);border:1px solid var(--accent);padding:13px 32px;cursor:pointer;font-family:inherit;font-size:12px;text-transform:uppercase;letter-spacing:1px;transition:.2s;align-self:flex-start;" onmouseover="this.style.background='var(--accent)';this.style.color='#000'" onmouseout="this.style.background='transparent';this.style.color='var(--accent)'">Сохранить</button>
     </div>
   </div>
 </div>
 
-<!-- ── ADMIN PANEL ──────────────────────────── -->
 <div id="admin-panel" onclick="if(event.target===this)closeAdminPanel()">
   <div class="admin-box">
     <div class="admin-header">
       <h2>⚡ Панель администратора</h2>
       <button class="admin-close" onclick="closeAdminPanel()">✕</button>
     </div>
-    <div class="admin-stats">
-      <div class="admin-stat">
-        <div class="admin-stat-num" id="admin-stat-posts">—</div>
-        <div class="admin-stat-label">Постов</div>
-      </div>
-      <div class="admin-stat">
-        <div class="admin-stat-num" id="admin-stat-comments">—</div>
-        <div class="admin-stat-label">Комментариев</div>
-      </div>
-      <div class="admin-stat">
-        <div class="admin-stat-num" id="admin-stat-users">—</div>
-        <div class="admin-stat-label">Авторов</div>
-      </div>
+    
+    <div class="admin-tabs">
+      <button class="admin-tab active" id="admin-tab-posts" onclick="switchAdminTab('posts')">Посты</button>
+      <button class="admin-tab" id="admin-tab-users" onclick="switchAdminTab('users')">Пользователи</button>
     </div>
-    <div id="admin-posts-list"></div>
+
+    <div id="admin-posts-container">
+      <div class="admin-stats">
+        <div class="admin-stat">
+          <div class="admin-stat-num" id="admin-stat-posts">—</div>
+          <div class="admin-stat-label">Постов</div>
+        </div>
+        <div class="admin-stat">
+          <div class="admin-stat-num" id="admin-stat-comments">—</div>
+          <div class="admin-stat-label">Комментариев</div>
+        </div>
+        <div class="admin-stat">
+          <div class="admin-stat-num" id="admin-stat-users">—</div>
+          <div class="admin-stat-label">Авторов</div>
+        </div>
+      </div>
+      <div id="admin-posts-list"></div>
+    </div>
+
+    <div id="admin-users-container" style="display:none; padding:24px 32px; background:var(--border);">
+      <input type="text" id="admin-user-search" placeholder="Поиск по имени или email..." oninput="filterAdminUsers()" style="width:100%; padding:14px; margin-bottom:16px; background:var(--bg); border:1px solid var(--border); color:var(--text); font-family:inherit; outline:none;">
+      <div id="admin-users-list" style="display:flex; flex-direction:column; gap:8px;"></div>
+    </div>
+
   </div>
 </div>
 
