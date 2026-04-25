@@ -205,8 +205,9 @@
         title, body,
         mainMedia: mainUrl,
         extraMedia: extras,
-        authorId:   window.currentUser.uid,
-        authorName: window.currentUser.displayName || window.currentUser.email,
+        authorId:    window.currentUser.uid,
+        authorName:  window.currentUser.displayName || window.currentUser.email,
+        authorPhoto: window.currentUser.photoURL || null,
         createdAt:  serverTimestamp(),
         comments:   []
       });
@@ -267,7 +268,12 @@
         ${img}
         <div class="card-body">
           <div class="card-meta">
-            <span class="card-author">${esc(post.authorName)}</span>
+            <div class="author-chip">
+              ${post.authorPhoto
+                ? `<img class="author-avatar" src="${esc(post.authorPhoto)}" alt="">`
+                : `<div class="author-avatar author-avatar-empty"></div>`}
+              <span class="card-author">${esc(post.authorName)}</span>
+            </div>
             <div class="card-actions">
               <span class="card-comments">Ответов: ${(post.comments||[]).length}</span>
               ${deleteBtnHTML}
@@ -286,7 +292,10 @@
   window.openModal = async (post) => {
     window.activePost = post;
     document.getElementById("modal-title").textContent   = post.title;
-    document.getElementById("modal-author").textContent  = post.authorName;
+    const authorAvatarHTML = post.authorPhoto
+      ? `<img class="author-avatar" src="${esc(post.authorPhoto)}" alt="">`
+      : `<div class="author-avatar author-avatar-empty"></div>`;
+    document.getElementById("modal-author").innerHTML = `<div class="author-chip">${authorAvatarHTML}<span>${esc(post.authorName)}</span></div>`;
     document.getElementById("modal-body").textContent    = post.body || "";
 
     const mainEl = document.getElementById("modal-main-media");
@@ -347,11 +356,12 @@
         mediaUrl = { url: r.secure_url, type: r.resource_type };
       }
       const comment = {
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 9), // Уникальный ID для удаления
+        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
         text, media: mediaUrl,
-        authorId:   window.currentUser.uid,
-        authorName: window.currentUser.displayName || window.currentUser.email,
-        createdAt:  Date.now()
+        authorId:    window.currentUser.uid,
+        authorName:  window.currentUser.displayName || window.currentUser.email,
+        authorPhoto: window.currentUser.photoURL || null,
+        createdAt:   Date.now()
       };
       await updateDoc(doc(db, "posts", window.activePost.id), { comments: arrayUnion(comment) });
       document.getElementById("comment-text").value  = "";
@@ -385,9 +395,15 @@
       const isCommentAuthor = window.currentUser && window.currentUser.uid === c.authorId;
       const deleteHtml = isCommentAuthor ? `<button class="del-comment-btn" onclick="deleteComment('${c.id}')">Удалить</button>` : '';
 
+      const commentAvatarHTML = c.authorPhoto
+        ? `<img class="author-avatar" src="${esc(c.authorPhoto)}" alt="">`
+        : `<div class="author-avatar author-avatar-empty"></div>`;
       div.innerHTML = `
         <div class="comment-header">
-          <span class="comment-author">${esc(c.authorName)}</span>
+          <div class="author-chip">
+            ${commentAvatarHTML}
+            <span class="comment-author">${esc(c.authorName)}</span>
+          </div>
           <div style="display:flex; gap: 10px; align-items:center;">
             <span class="comment-time">${c.createdAt ? new Date(c.createdAt).toLocaleDateString() : ""}</span>
             ${deleteHtml}
@@ -613,6 +629,9 @@ body {
 .card-thumb-empty { width:100%; height:120px; display:flex; align-items:center; justify-content:center; background:var(--bg2); border-bottom: 1px solid var(--border); }
 .card-body { padding:24px; }
 .card-meta { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+.author-chip { display:flex; align-items:center; gap:8px; }
+.author-avatar { width:24px; height:24px; border-radius:50%; object-fit:cover; border:1px solid var(--border); flex-shrink:0; display:block; }
+.author-avatar-empty { background:var(--bg3); width:24px; height:24px; border-radius:50%; border:1px solid var(--border); flex-shrink:0; }
 .card-author { font-size:11px; color:var(--accent); text-transform: uppercase; letter-spacing: 1px; }
 .card-actions { display:flex; gap:12px; align-items:center; }
 .card-comments { font-size:11px; color:var(--muted); text-transform: uppercase;}
