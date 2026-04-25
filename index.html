@@ -8,7 +8,7 @@
 
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, updateProfile, updateEmail, updatePassword, reauthenticateWithCredential, EmailAuthProvider } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
   // Добавлен deleteDoc для удаления постов
   import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, arrayUnion, query, orderBy, onSnapshot, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
@@ -51,6 +51,7 @@
       document.getElementById("auth-section").style.display = "none";
       document.getElementById("app-section").style.display  = "block";
       document.getElementById("user-name-display").textContent = user.displayName || user.email;
+      updateTopbarAvatar(user.photoURL);
       loadPosts();
     } else {
       document.getElementById("auth-section").style.display = "flex";
@@ -89,6 +90,95 @@
   // ── Logout
   window.doLogout = () => signOut(auth);
 
+  // ── Profile Modal ─────────────────────────────────────────────────────────
+  window.openProfileModal = () => {
+    const u = window.currentUser;
+    if (!u) return;
+    document.getElementById("prof-name-input").value  = u.displayName || "";
+    document.getElementById("prof-email-input").value = u.email || "";
+    document.getElementById("prof-pass-new").value    = "";
+    document.getElementById("prof-reauth-pass").value = "";
+    document.getElementById("prof-error").textContent   = "";
+    document.getElementById("prof-success").textContent = "";
+    const av = document.getElementById("prof-avatar-preview");
+    if (u.photoURL) { av.src = u.photoURL; av.style.display = "block"; }
+    else { av.style.display = "none"; }
+    document.getElementById("profile-modal").style.display = "flex";
+    document.body.style.overflow = "hidden";
+  };
+
+  window.closeProfileModal = () => {
+    document.getElementById("profile-modal").style.display = "none";
+    document.body.style.overflow = "";
+  };
+
+  window.previewAvatar = (input) => {
+    const el = document.getElementById("prof-avatar-preview");
+    if (input.files[0]) { el.src = URL.createObjectURL(input.files[0]); el.style.display = "block"; }
+  };
+
+  window.saveProfile = async () => {
+    const u = window.currentUser;
+    if (!u) return;
+    const newName    = document.getElementById("prof-name-input").value.trim();
+    const newEmail   = document.getElementById("prof-email-input").value.trim();
+    const reauthPass = document.getElementById("prof-reauth-pass").value;
+    const newPass    = document.getElementById("prof-pass-new").value;
+    const avatarFile = document.getElementById("prof-avatar-input").files[0];
+    const errEl = document.getElementById("prof-error");
+    const okEl  = document.getElementById("prof-success");
+    errEl.textContent = ""; okEl.textContent = "";
+    if (!newName) return errEl.textContent = "Имя не может быть пустым.";
+    const needsReauth = (newEmail && newEmail !== u.email) || newPass;
+    if (needsReauth && !reauthPass) return errEl.textContent = "Для смены email или пароля введите текущий пароль.";
+    setProfLoading(true);
+    try {
+      if (needsReauth) {
+        const cred = EmailAuthProvider.credential(u.email, reauthPass);
+        await reauthenticateWithCredential(u, cred);
+      }
+      let photoURL = u.photoURL || null;
+      if (avatarFile) { const r = await uploadToCloudinary(avatarFile); photoURL = r.secure_url; }
+      if (newName !== u.displayName || photoURL !== u.photoURL) {
+        await updateProfile(u, { displayName: newName, photoURL });
+      }
+      if (newEmail && newEmail !== u.email) await updateEmail(u, newEmail);
+      if (newPass) {
+        if (newPass.length < 6) throw new Error("Новый пароль должен содержать не менее 6 символов.");
+        await updatePassword(u, newPass);
+      }
+      // refresh topbar
+      document.getElementById("user-name-display").textContent = u.displayName || u.email;
+      updateTopbarAvatar(u.photoURL);
+      okEl.textContent = "Профиль успешно обновлён!";
+      document.getElementById("prof-avatar-input").value = "";
+    } catch(e) {
+      if (e.code === "auth/wrong-password")        errEl.textContent = "Неверный текущий пароль.";
+      else if (e.code === "auth/email-already-in-use") errEl.textContent = "Этот email уже используется.";
+      else if (e.code === "auth/invalid-email")    errEl.textContent = "Неверный формат email.";
+      else errEl.textContent = e.message;
+    } finally { setProfLoading(false); }
+  };
+
+  function setProfLoading(v) {
+    const b = document.getElementById("prof-save-btn");
+    b.disabled = v; b.textContent = v ? "Сохранение…" : "Сохранить";
+  }
+
+  function updateTopbarAvatar(photoURL) {
+    const el = document.getElementById("topbar-avatar");
+    if (!el) return;
+    if (photoURL) {
+      el.style.backgroundImage = `url(${photoURL})`;
+      el.style.backgroundSize = "cover";
+      el.style.backgroundPosition = "center";
+      el.textContent = "";
+    } else {
+      el.style.backgroundImage = "";
+      el.textContent = "👤";
+    }
+  }
+
   // ── Posts
   window.submitPost = async () => {
     if (!window.currentUser) return;
@@ -115,10 +205,9 @@
         title, body,
         mainMedia: mainUrl,
         extraMedia: extras,
-        authorId:    window.currentUser.uid,
-        authorName:  window.currentUser.displayName || window.currentUser.email,
-        authorPhoto: window.currentUser.photoURL || null,
-        createdAt:   serverTimestamp(),
+        authorId:   window.currentUser.uid,
+        authorName: window.currentUser.displayName || window.currentUser.email,
+        createdAt:  serverTimestamp(),
         comments:   []
       });
       document.getElementById("post-title").value = "";
@@ -178,10 +267,7 @@
         ${img}
         <div class="card-body">
           <div class="card-meta">
-            <div class="author-chip">
-              ${post.authorPhoto ? `<img class="author-avatar" src="${esc(post.authorPhoto)}" alt="">` : `<div class="author-avatar author-avatar-placeholder"></div>`}
-              <span class="card-author">${esc(post.authorName)}</span>
-            </div>
+            <span class="card-author">${esc(post.authorName)}</span>
             <div class="card-actions">
               <span class="card-comments">Ответов: ${(post.comments||[]).length}</span>
               ${deleteBtnHTML}
@@ -200,11 +286,7 @@
   window.openModal = async (post) => {
     window.activePost = post;
     document.getElementById("modal-title").textContent   = post.title;
-    document.getElementById("modal-author").innerHTML = `
-      <div class="author-chip">
-        ${post.authorPhoto ? `<img class="author-avatar" src="${esc(post.authorPhoto)}" alt="">` : `<div class="author-avatar author-avatar-placeholder"></div>`}
-        <span>${esc(post.authorName)}</span>
-      </div>`;
+    document.getElementById("modal-author").textContent  = post.authorName;
     document.getElementById("modal-body").textContent    = post.body || "";
 
     const mainEl = document.getElementById("modal-main-media");
@@ -267,10 +349,9 @@
       const comment = {
         id: Date.now().toString() + Math.random().toString(36).substr(2, 9), // Уникальный ID для удаления
         text, media: mediaUrl,
-        authorId:    window.currentUser.uid,
-        authorName:  window.currentUser.displayName || window.currentUser.email,
-        authorPhoto: window.currentUser.photoURL || null,
-        createdAt:   Date.now()
+        authorId:   window.currentUser.uid,
+        authorName: window.currentUser.displayName || window.currentUser.email,
+        createdAt:  Date.now()
       };
       await updateDoc(doc(db, "posts", window.activePost.id), { comments: arrayUnion(comment) });
       document.getElementById("comment-text").value  = "";
@@ -306,10 +387,7 @@
 
       div.innerHTML = `
         <div class="comment-header">
-          <div class="author-chip">
-            ${c.authorPhoto ? `<img class="author-avatar" src="${esc(c.authorPhoto)}" alt="">` : `<div class="author-avatar author-avatar-placeholder"></div>`}
-            <span class="comment-author">${esc(c.authorName)}</span>
-          </div>
+          <span class="comment-author">${esc(c.authorName)}</span>
           <div style="display:flex; gap: 10px; align-items:center;">
             <span class="comment-time">${c.createdAt ? new Date(c.createdAt).toLocaleDateString() : ""}</span>
             ${deleteHtml}
@@ -471,6 +549,11 @@ body {
 }
 .topbar-logo img { width: 20px; height: 20px; filter: invert(90%) sepia(15%) saturate(300%) hue-rotate(350deg); }
 .topbar-right { display:flex; align-items:center; gap:24px; }
+.topbar-user-chip { display:flex; align-items:center; gap:8px; cursor:pointer; padding:6px 12px; border:1px solid var(--border); transition:.2s; }
+.topbar-user-chip:hover { border-color:var(--accent); }
+.topbar-avatar { width:28px; height:28px; border-radius:50%; border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:14px; flex-shrink:0; background:var(--bg3); overflow:hidden; background-size:cover; background-position:center; }
+.settings-icon { font-size:14px; color:var(--muted); transition:.2s; }
+.topbar-user-chip:hover .settings-icon { color:var(--accent); }
 .user-badge { font-size:13px; color:var(--muted); }
 .topbar-btn { background:transparent; border:none; color:var(--muted); font-family:inherit; font-size:13px; text-transform: uppercase; letter-spacing: 1px; cursor:pointer; transition:.2s; }
 .topbar-btn:hover { color:var(--accent); }
@@ -530,10 +613,6 @@ body {
 .card-thumb-empty { width:100%; height:120px; display:flex; align-items:center; justify-content:center; background:var(--bg2); border-bottom: 1px solid var(--border); }
 .card-body { padding:24px; }
 .card-meta { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-.author-chip { display:flex; align-items:center; gap:8px; }
-.author-avatar { width:26px; height:26px; border-radius:50%; object-fit:cover; border:1px solid var(--border); flex-shrink:0; }
-.author-avatar-placeholder { background:var(--bg3); }
-
 .card-author { font-size:11px; color:var(--accent); text-transform: uppercase; letter-spacing: 1px; }
 .card-actions { display:flex; gap:12px; align-items:center; }
 .card-comments { font-size:11px; color:var(--muted); text-transform: uppercase;}
@@ -644,7 +723,11 @@ body {
   <nav class="topbar">
     <div class="topbar-logo">Never Lose Your Land</div>
     <div class="topbar-right">
-      <span class="user-badge" id="user-name-display"></span>
+      <div class="topbar-user-chip" onclick="openProfileModal()" title="Настройки профиля">
+        <div class="topbar-avatar" id="topbar-avatar">👤</div>
+        <span class="user-badge" id="user-name-display"></span>
+        <span class="settings-icon">⚙</span>
+      </div>
       <button class="ask-btn" onclick="togglePostForm()">Написать</button>
       <button class="topbar-btn" onclick="doLogout()">Выход</button>
     </div>
@@ -721,6 +804,69 @@ body {
         </div>
         <div id="comment-preview"></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── PROFILE MODAL ──────────────────────────── -->
+<div id="profile-modal" onclick="if(event.target===this)closeProfileModal()" style="display:none;position:fixed;inset:0;z-index:600;background:rgba(0,0,0,0.92);backdrop-filter:blur(6px);overflow-y:auto;padding:40px 20px;align-items:flex-start;justify-content:center;">
+  <div style="background:var(--bg);border:1px solid var(--border);width:100%;max-width:500px;margin:auto;animation:modalIn .35s ease-out;">
+
+    <!-- Header -->
+    <div style="padding:28px 32px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);">
+      <h2 style="font-family:'Playfair Display',serif;font-size:22px;font-weight:400;color:var(--accent);">Настройки профиля</h2>
+      <button onclick="closeProfileModal()" style="background:transparent;border:none;color:var(--muted);font-size:22px;cursor:pointer;line-height:1;transition:.2s;" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--muted)'">✕</button>
+    </div>
+
+    <!-- Body -->
+    <div style="padding:28px 32px;display:flex;flex-direction:column;gap:20px;">
+
+      <!-- Avatar -->
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Фото профиля</label>
+        <div style="display:flex;align-items:center;gap:16px;">
+          <img id="prof-avatar-preview" src="" alt="" style="display:none;width:60px;height:60px;border-radius:50%;object-fit:cover;border:1px solid var(--border);">
+          <label style="display:inline-flex;align-items:center;gap:8px;background:transparent;border:1px dashed var(--border);padding:10px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);cursor:pointer;transition:.2s;" onmouseover="this.style.borderColor='var(--accent)';this.style.color='var(--accent)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--muted)'">
+            📷 Загрузить фото
+            <input id="prof-avatar-input" type="file" accept="image/*" onchange="previewAvatar(this)" style="display:none;">
+          </label>
+        </div>
+      </div>
+
+      <!-- Name -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <label style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Имя пользователя</label>
+        <input id="prof-name-input" type="text" placeholder="Ваше имя" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+      </div>
+
+      <!-- Divider -->
+      <div style="border-top:1px dashed rgba(220,205,175,0.1);margin:4px 0;"></div>
+      <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;">Изменить email или пароль</p>
+
+      <!-- Email -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Новый Email</label>
+        <input id="prof-email-input" type="email" placeholder="Оставьте пустым, если не меняете" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+      </div>
+
+      <!-- New Password -->
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Новый пароль</label>
+        <input id="prof-pass-new" type="password" placeholder="Оставьте пустым, если не меняете" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+      </div>
+
+      <!-- Current password for reauth -->
+      <div style="display:flex;flex-direction:column;gap:8px;background:var(--bg2);padding:16px;border:1px solid var(--border);">
+        <label style="font-size:11px;color:var(--muted);letter-spacing:1px;">Текущий пароль <span style="opacity:.6;">(обязателен при смене email / пароля)</span></label>
+        <input id="prof-reauth-pass" type="password" placeholder="Введите текущий пароль" style="background:transparent;border:none;border-bottom:1px solid var(--border);padding:10px 0;color:var(--text);font-family:inherit;font-size:14px;outline:none;transition:.2s;" onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+      </div>
+
+      <!-- Messages -->
+      <div id="prof-error"   style="color:#a34444;font-size:13px;min-height:14px;"></div>
+      <div id="prof-success" style="color:#4a8a4a;font-size:13px;min-height:14px;"></div>
+
+      <!-- Save btn -->
+      <button id="prof-save-btn" onclick="saveProfile()" style="background:transparent;color:var(--accent);border:1px solid var(--accent);padding:13px 32px;cursor:pointer;font-family:inherit;font-size:12px;text-transform:uppercase;letter-spacing:1px;transition:.2s;align-self:flex-start;" onmouseover="this.style.background='var(--accent)';this.style.color='#000'" onmouseout="this.style.background='transparent';this.style.color='var(--accent)'">Сохранить</button>
     </div>
   </div>
 </div>
