@@ -147,9 +147,12 @@
         if (newPass.length < 6) throw new Error("Новый пароль должен содержать не менее 6 символов.");
         await updatePassword(u, newPass);
       }
-      // refresh topbar
-      document.getElementById("user-name-display").textContent = u.displayName || u.email;
-      updateTopbarAvatar(u.photoURL);
+      // Force reload so auth.currentUser reflects new photoURL immediately
+      await auth.currentUser.reload();
+      window.currentUser = auth.currentUser;
+      // refresh topbar using the local photoURL we just set (not stale u.photoURL)
+      document.getElementById("user-name-display").textContent = auth.currentUser.displayName || auth.currentUser.email;
+      updateTopbarAvatar(photoURL);
       okEl.textContent = "Профиль успешно обновлён!";
       document.getElementById("prof-avatar-input").value = "";
     } catch(e) {
@@ -169,13 +172,9 @@
     const el = document.getElementById("topbar-avatar");
     if (!el) return;
     if (photoURL) {
-      el.style.backgroundImage = `url(${photoURL})`;
-      el.style.backgroundSize = "cover";
-      el.style.backgroundPosition = "center";
-      el.textContent = "";
+      el.innerHTML = `<img src="${photoURL}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;display:block;">`;
     } else {
-      el.style.backgroundImage = "";
-      el.textContent = "👤";
+      el.innerHTML = "👤";
     }
   }
 
